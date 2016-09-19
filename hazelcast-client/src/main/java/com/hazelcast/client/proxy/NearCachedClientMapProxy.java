@@ -23,6 +23,7 @@ import com.hazelcast.client.impl.protocol.codec.MapGetAllCodec;
 import com.hazelcast.client.impl.protocol.codec.MapRemoveCodec;
 import com.hazelcast.client.impl.protocol.codec.MapRemoveEntryListenerCodec;
 import com.hazelcast.client.map.impl.nearcache.ClientHeapNearCache;
+import com.hazelcast.client.spi.ClientClusterService;
 import com.hazelcast.client.spi.ClientContext;
 import com.hazelcast.client.spi.EventHandler;
 import com.hazelcast.client.spi.impl.ListenerMessageCodec;
@@ -37,6 +38,7 @@ import com.hazelcast.map.impl.nearcache.StaleReadPreventerNearCacheWrapper;
 import com.hazelcast.monitor.LocalMapStats;
 import com.hazelcast.monitor.NearCacheStats;
 import com.hazelcast.monitor.impl.LocalMapStatsImpl;
+import com.hazelcast.nio.Address;
 import com.hazelcast.nio.serialization.Data;
 import com.hazelcast.util.CollectionUtil;
 import com.hazelcast.util.MapUtil;
@@ -110,7 +112,7 @@ public class NearCachedClientMapProxy<K, V> extends ClientMapProxy<K, V> {
     @Override
     protected V getInternal(Data key) {
         Object cached = nearCache.get(key);
-        if (cached != null) {
+        if (cached != null || useNearcacheOnly()) {
             if (NULL_OBJECT == cached) {
                 return null;
             }
@@ -126,6 +128,24 @@ public class NearCachedClientMapProxy<K, V> extends ClientMapProxy<K, V> {
         }
 
         return value;
+    }
+
+    private boolean useNearcacheOnly() {
+        ClientClusterService clientClusterService = getClient().getClientClusterService();
+        Address ownerConnectionAddress = clientClusterService.getOwnerConnectionAddress();
+
+        boolean isOwnerConnectionAvailable = ownerConnectionAddress != null
+                && getClient().getConnectionManager().getConnection(ownerConnectionAddress) != null;
+
+        boolean clientIsRunning = clientIsRunning();
+        boolean useNearcacheOnly = clientIsRunning && !isOwnerConnectionAvailable;
+
+        return useNearcacheOnly;
+    }
+
+    private boolean clientIsRunning() {
+        boolean result = getClient().getLifecycleService().isRunning();
+        return result;
     }
 
     @Override
@@ -212,6 +232,12 @@ public class NearCachedClientMapProxy<K, V> extends ClientMapProxy<K, V> {
 
     @Override
     protected V putInternal(long ttl, TimeUnit timeunit, Data keyData, Data valueData) {
+        if (useNearcacheOnly()) {
+            //TODO following two lines should be atomic
+            V previousValue = (V) nearCache.get(keyData);
+            nearCache.put(keyData, valueData);
+            return previousValue;
+        }
         V previousValue = super.putInternal(ttl, timeunit, keyData, valueData);
         invalidateNearCache(keyData);
         return previousValue;
